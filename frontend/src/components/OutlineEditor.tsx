@@ -1,11 +1,10 @@
 import { useState, useCallback, useEffect } from 'react';
 import {
   Edit3, Plus, Trash2, ChevronUp, ChevronDown,
-  Presentation, Eye, Lightbulb, Check, X, Layout,
+  Presentation, Eye, Lightbulb, Check, X,
   BarChart3, Users, GitBranch, Building2, DollarSign, TrendingUp, Globe2, FileText,
 } from 'lucide-react';
 import type { ReportOutline, SlideOutline } from '../types';
-import SlidePreview from './SlidePreview';
 
 interface OutlineEditorProps {
   outline: ReportOutline;
@@ -61,7 +60,7 @@ function InlineEdit({
           className={`bg-white border border-brand-blue rounded-lg px-2 py-1 text-slate-900
                       focus:outline-none w-full ${className}`} />
       )}
-      <button onClick={commit} className="text-brand-green hover:text-green-400 flex-shrink-0 mt-0.5"><Check className="w-4 h-4" /></button>
+      <button onClick={commit} className="text-brand-green hover:text-brand-blue flex-shrink-0 mt-0.5"><Check className="w-4 h-4" /></button>
       <button onClick={cancel} className="text-brand-dgray hover:text-slate-900 flex-shrink-0 mt-0.5"><X className="w-4 h-4" /></button>
     </span>
   );
@@ -75,7 +74,6 @@ export default function OutlineEditor({
 }: OutlineEditorProps) {
   const [outline, setOutline] = useState<ReportOutline>(() => ensureSevenSlides(initialOutline));
   const [activeSlide, setActiveSlide] = useState(0);
-  const [showPreview, setShowPreview] = useState(true);
 
   useEffect(() => {
     setOutline(ensureSevenSlides(initialOutline));
@@ -119,11 +117,6 @@ export default function OutlineEditor({
                 <p className="text-brand-dgray text-sm mt-1">Edit slides before generating your deck</p>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <button onClick={() => setShowPreview(v => !v)}
-            className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition-all
-              ${showPreview ? 'border-brand-blue/50 bg-brand-blue/10 text-brand-blue' : 'border-brand-border text-brand-dgray hover:text-slate-900'}`}>
-            <Layout className="w-4 h-4" /> {showPreview ? 'Hide Preview' : 'Show Preview'}
-          </button>
           <button onClick={onViewReport}
             className="flex items-center gap-2 px-3 py-2 rounded-xl border border-brand-border
                        text-brand-dgray hover:text-slate-900 hover:border-brand-blue/50 text-sm transition-all">
@@ -165,16 +158,8 @@ export default function OutlineEditor({
           ))}
         </div>
 
-        {/* Right panel: editor + preview */}
+        {/* Right panel: editor */}
         <div className="space-y-5 overflow-y-auto max-h-[70vh] pr-1">
-          {/* ── Live Preview ── */}
-          {showPreview && slide && (
-            <div>
-              <p className="text-brand-dgray text-xs font-medium mb-2 uppercase tracking-wide">Live Preview</p>
-              <SlidePreview slide={slide} />
-            </div>
-          )}
-
           {/* ── Editor ── */}
           {slide && (
             <div className="bg-brand-surface border border-brand-border rounded-2xl p-5">

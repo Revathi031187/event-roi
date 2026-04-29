@@ -71,20 +71,6 @@ export function downloadUrl(filename: string): string {
   return `${BASE}/download/${filename}`;
 }
 
-/** Same outline transforms as server-side PPTX (tables, funnel summaries, number formatting). */
-export async function getPptPreviewOutline(outline: ReportOutline): Promise<ReportOutline> {
-  const res = await fetch(`${BASE}/generate/ppt-preview-outline`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(outline),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail || 'Preview normalization failed');
-  }
-  return res.json();
-}
-
 // ── Report history ────────────────────────────────────────────────────────────
 
 export async function listReports(): Promise<SavedReport[]> {

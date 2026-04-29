@@ -5,21 +5,24 @@ export default {
     extend: {
       colors: {
         brand: {
-          bg:      '#F8FAFC',
+          // Databricks web-inspired core tokens
+          bg: '#F9F7F4',
           surface: '#FFFFFF',
-          card:    '#F8FAFC',
-          border:  '#DCE4EE',
-          red:     '#FF3621',
-          blue:    '#2563EB',
-          green:   '#16A34A',
-          amber:   '#D97706',
-          lgray:   '#334155',
-          dgray:   '#64748B',
+          card: '#FFFFFF',
+          border: '#DCE0E2',
+          navy: '#1B3139',
+          red: '#FF3621',
+          blue: '#1B5162',
+          // Keep semantic key but avoid green in UI usage.
+          green: '#1B5162',
+          amber: '#FFAB00',
+          lgray: '#5A6F77',
+          dgray: '#90A5B1',
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['DM Sans', 'Inter', 'system-ui', 'sans-serif'],
+        mono: ['DM Mono', 'JetBrains Mono', 'Fira Code', 'monospace'],
       },
       animation: {
         'spin-slow': 'spin 2s linear infinite',

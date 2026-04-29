@@ -97,7 +97,11 @@ export function useEventReport() {
         }
         if (evt.phase === 3 && evt.data) {
           const d = evt.data as { report?: string; outline?: ReportOutline };
-          if (d.report) setReport(d.report);
+          if (d.report) {
+            setReport(d.report);
+            // Authoritative full text from the server (avoids streamed state lag vs phase_done).
+            setSynthesisText(d.report);
+          }
           if (d.outline) setOutline(d.outline as ReportOutline);
         }
       }
@@ -230,10 +234,14 @@ export function useEventReport() {
     setActiveEventName('');
   }, []);
 
+  const setStepFromRoute = useCallback((nextStep: AppStep) => {
+    setStep(prev => (prev === nextStep ? prev : nextStep));
+  }, []);
+
   return {
     step, jobId, phases, questions, queryProgress, synthesisText,
     report, outline, pptUrl, pptFilename, activeEventName,
     error, generatingPPT, pptSlides,
-    startGeneration, generatePPT, loadSavedReport, reset,
+    startGeneration, generatePPT, loadSavedReport, reset, setStepFromRoute,
   };
 }

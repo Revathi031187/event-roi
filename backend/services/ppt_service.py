@@ -16,22 +16,27 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from models.schemas import ReportOutline, SlideOutline
 from config import settings
+from .outline_parser import (
+    synthesize_data_driven_insight,
+    insight_requires_rewrite,
+)
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-C_BG      = RGBColor(0xFF, 0xFF, 0xFF)
-C_HEADER  = RGBColor(0xF8, 0xFA, 0xFC)
-C_SURFACE = RGBColor(0xF1, 0xF5, 0xF9)
+# Databricks web-inspired core palette
+C_BG      = RGBColor(0xF9, 0xF7, 0xF4)
+C_HEADER  = RGBColor(0xFF, 0xFF, 0xFF)
+C_SURFACE = RGBColor(0xEE, 0xED, 0xE9)
 C_CARD    = RGBColor(0xFF, 0xFF, 0xFF)
 C_RED     = RGBColor(0xFF, 0x36, 0x21)
-C_ORANGE  = RGBColor(0xFF, 0x7D, 0x00)
-C_TEAL    = RGBColor(0x00, 0x99, 0xC4)
-C_GREEN   = RGBColor(0x00, 0xC4, 0x72)
-C_WHITE   = RGBColor(0x11, 0x18, 0x27)
-C_LGRAY   = RGBColor(0x33, 0x40, 0x52)
-C_DGRAY   = RGBColor(0xD6, 0xDE, 0xE8)
-C_YELL_BG = RGBColor(0xFF, 0xF7, 0xCC)
-C_YELL_BR = RGBColor(0xF5, 0xC5, 0x42)
-C_YELL_TX = RGBColor(0x7A, 0x4B, 0x00)
+C_ORANGE  = RGBColor(0xFF, 0xAB, 0x00)
+C_TEAL    = RGBColor(0x1B, 0x51, 0x62)
+C_GREEN   = RGBColor(0x00, 0xA9, 0x72)
+C_WHITE   = RGBColor(0x1B, 0x31, 0x39)
+C_LGRAY   = RGBColor(0x5A, 0x6F, 0x77)
+C_DGRAY   = RGBColor(0xDC, 0xE0, 0xE2)
+C_YELL_BG = RGBColor(0xFF, 0xF0, 0xD3)
+C_YELL_BR = RGBColor(0xFC, 0xBA, 0x33)
+C_YELL_TX = RGBColor(0x7D, 0x53, 0x19)
 
 SLIDE_W  = Inches(13.33)
 SLIDE_H  = Inches(7.50)
@@ -51,7 +56,7 @@ COL_GAP = Inches(0.22)
 RIGHT_X = MG + LEFT_W + COL_GAP
 RIGHT_W = SLIDE_W - RIGHT_X - MG
 
-_CHART_COLORS = ["#FF3621", "#0099C4", "#00C472", "#FF7D00", "#8B5CF6", "#F59E0B"]
+_CHART_COLORS = ["#FF3621", "#1B5162", "#00A972", "#FFAB00", "#AB4057", "#618794"]
 
 # Databricks mark (transparent PNG) — same path as packaged assets for add_picture
 _DATABRICKS_LOGO_PATH = os.path.normpath(
@@ -103,7 +108,7 @@ def _rect(slide, l, t, w, h, fill: RGBColor, border: RGBColor = None):
 
 def _txt(slide, text: str, l, t, w, h,
          size=13, bold=False, color=C_WHITE,
-         align=PP_ALIGN.LEFT, wrap=True, font="Calibri", line_spacing=1.15):
+         align=PP_ALIGN.LEFT, wrap=True, font="DM Sans", line_spacing=1.15):
     txb = slide.shapes.add_textbox(l, t, w, h)
     tf = txb.text_frame
     tf.word_wrap = wrap
@@ -127,7 +132,7 @@ def _txt(slide, text: str, l, t, w, h,
 
 def _txt_emphasis(slide, text: str, l, t, w, h,
                   size=12, color=C_LGRAY, align=PP_ALIGN.LEFT,
-                  wrap=True, font="Calibri", line_spacing=1.12):
+                  wrap=True, font="DM Sans", line_spacing=1.12):
     """Render text with lightweight emphasis: bold numeric tokens, italic data-gap notes."""
     txb = slide.shapes.add_textbox(l, t, w, h)
     tf = txb.text_frame
@@ -316,7 +321,13 @@ def _format_text_numbers(text: str, title: str = "") -> str:
     """Round long decimals and add currency where context clearly indicates monetary values."""
     s = _repair_fragmented_currency(_clean(text))
     s = _repair_inner_currency_corruption(s)
-    monetary_context = _is_money_label(title)
+    title_l = (title or "").lower()
+    # Funnel/attendance/comparison slides are primarily count/rate driven; do not
+    # force currency formatting just because title includes broad business terms.
+    non_money_title_context = any(
+        k in title_l for k in ("funnel", "conversion", "attendance", "registration", "segment", "comparison", "yoy")
+    )
+    monetary_context = _is_money_label(title) and not non_money_title_context
 
     shields: list[str] = []
 
@@ -338,7 +349,9 @@ def _format_text_numbers(text: str, title: str = "") -> str:
             last = m.end()
             continue
         prev = s[max(0, m.start() - 28):m.start()].lower()
-        prev_has_money = any(k in prev for k in ("$", "pipeline", "revenue", "arr", "spend", "cost", "roi", "value", "opportun"))
+        prev_has_money = any(
+            k in prev for k in ("revenue", "arr", "spend", "cost", "roi", "value", "amount", "budget")
+        )
         next_chunk = s[m.end():m.end() + 18].lower()
         next_has_percent = "%" in next_chunk
         if next_has_percent:
@@ -1001,10 +1014,25 @@ def _build_slide(slide, data: SlideOutline, total: int, event_name: str):
     _two_col_slide(slide, d, total, event_name, accent, chart_img=None)
 
 
+def _insight_incomplete(text: str) -> bool:
+    t = _clean(text).strip()
+    if not t or len(t) < 36:
+        return True
+    low = t.lower()
+    if low.endswith(("vs.", "vs", "and", "or", "with", "to", ";", ":")):
+        return True
+    return False
+
+
 def _fmt_insight_for_export(data: SlideOutline) -> str:
-    if not (data.insight or "").strip():
-        return ""
-    return _format_text_numbers(_clean(data.insight), data.title)
+    existing = _format_text_numbers(_clean(data.insight), data.title) if (data.insight or "").strip() else ""
+    pts = list(data.points or [])
+    if existing and not _insight_incomplete(existing) and not insight_requires_rewrite(existing, pts):
+        return existing
+    derived = synthesize_data_driven_insight(data.title or "", pts)
+    if derived:
+        return _format_text_numbers(derived, data.title)
+    return existing
 
 
 def slide_outline_as_in_ppt(data: SlideOutline) -> SlideOutline:
@@ -1065,7 +1093,7 @@ def _cover(prs: Presentation, event_name: str):
 
     _txt(slide, "POST-EVENT ROI REPORT",
          Inches(0.65), Inches(1.10), Inches(8.6), Inches(0.5),
-         size=15, color=C_LGRAY, font="Calibri Light")
+         size=15, color=C_LGRAY, font="DM Sans")
     _txt(slide, event_name,
          Inches(0.65), Inches(1.95), Inches(12.0), Inches(1.9),
          size=52, bold=True, color=C_WHITE)

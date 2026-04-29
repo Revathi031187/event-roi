@@ -1,6 +1,6 @@
 import json
 import re
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from google import genai
 from google.genai import types
 from config import settings
@@ -62,127 +62,147 @@ def _extract_json_array(raw: str, event_name: str = "") -> list[str]:
     ]
 
 
+def _extract_json_string_list(raw: str, expected_len: int) -> Optional[list[str]]:
+    """Parse a JSON array of strings; pad/truncate to expected_len."""
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        parts = cleaned.split("```")
+        cleaned = parts[1] if len(parts) > 1 else cleaned
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.rstrip("`").strip()
+    try:
+        result = json.loads(cleaned)
+        if isinstance(result, list):
+            out = [str(x).strip() for x in result if str(x).strip()]
+            if len(out) >= expected_len:
+                return out[:expected_len]
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\[[\s\S]*\]", raw)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, list):
+                out = [str(x).strip() for x in result if str(x).strip()]
+                if len(out) >= expected_len:
+                    return out[:expected_len]
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 # ── System prompts ────────────────────────────────────────────────────────────
 
-PLANNER_SYSTEM_PROMPT = """
-You are a data analytics question architect. You design natural-language questions for a
-conversational BI agent called Genie that automatically translates English to SQL.
+METRIC_DEFINITIONS = """
+## Metric Definitions
+- **fPOI (Forecasted Pipeline on Investment)** = SUM(u2_ARR) / SUM(allocated_spend)
+  Formula: IF(SUM(allocated_spend) = 0, 0, SUM(u2_ARR) / SUM(allocated_spend))
+- **Attendance Rate** = Attended / Registered × 100
+- **U2** = Pipeline Created stage
+- **U3 / QRR** = Qualified Pipeline stage
 
-## THE GOLDEN RULE — Write Plain Business English
-Genie maps business language to actual database columns automatically.
-You MUST NOT use SQL, column names, or table names in your questions.
-
-Examples of CORRECT questions:
-  ✓ "How many people registered vs actually attended, broken down by city or program?"
-  ✓ "What is the total revenue pipeline created, by deal stage and region?"
-  ✓ "Show total spend by category and calculate cost per attendee and cost per lead"
-  ✓ "Which geographic regions generated the most pipeline value?"
-
-Examples of WRONG questions:
-  ✗ "SELECT registered_count FROM rpt_event_performance GROUP BY child_program"
-  ✗ "Show u2_amount and u3_amount by child_program"
-  ✗ "What is SUM(allocated_spend) from gold_roi_attribution_spend?"
-
-## How to Use Schema Information
-When a data schema is provided:
-  1. Identify KEY DIMENSIONS — categorical columns used for grouping (program, city, region, segment, date, tier, etc.)
-  2. Identify KEY MEASURES — numeric columns (counts, amounts, rates, booleans)
-  3. Translate any technical labels from the discovered schema into business-friendly wording
-  4. ONLY ask about topics that exist in the schema
-  5. Write broad questions so Genie can handle slight column-name variations
-  6. If header + first-row previews are available, prioritize columns and dimensions that clearly appear in those previews
-  7. Avoid asking for metrics that are not visible in schema or sample previews
-
-## Question Coverage (include each domain if schema supports it)
-  1. Overview/Summary: total KPIs, counts, top-level performance
-  2. Volume & Engagement: registrations, attendance, reach, participation
-  3. Lead Generation: leads, MQLs, pipeline qualification, conversion rates
-  4. Revenue Pipeline: deal values, ARR, opportunity amounts, stages
-  5. Cost & ROI: spend totals, cost per lead/attendee, efficiency ratios, ROI
-  6. Segmentation: by region, account type, customer vs. prospect, tier
-  7. Trends & Comparison: year-over-year, prior period, multi-event patterns
-
-## Output
-Return ONLY a valid JSON array of 5-8 question strings. No markdown, no commentary.
-["question one", "question two", ...]
+## Attribution Rules
+- Use existing MTA from gold tables — do NOT re-derive attribution
+- Pipeline numbers mature over 30–60 days post-event
+- Always use pre-computed registered/attended from rpt_event_performance
+- Roll up at parent_program_name level for multi-program events
+- Join logic: parent_program_name ↔ program for spend linkage
 """
 
-SYNTHESIZER_SYSTEM_PROMPT = """
-You are an expert analytics report writer. You receive structured data from multiple
-Genie queries and synthesize it into a professional, evidence-based slide report.
+REPORT_TEMPLATE = """
+## Report Structure (7 Slides)
 
-## Step 1 — Inventory What Data Actually Arrived
-Before writing a single word:
-- List every query that SUCCEEDED and what columns/rows came back
-- Identify the KEY DIMENSIONS in the data (what categories/groups exist)
-- Identify the KEY MEASURES (what numbers are in the data)
-- Note every FAILED or DEMO query — those topics will have no data
+### Slide 1: Executive Summary
+KPI headlines: Total Pipeline, Attendance Rate
 
-## Step 2 — Calculate Derived Metrics
-From available raw data, compute everything derivable:
-- Rates: attendance_rate = attended / registered × 100
-- Efficiency: cost per lead = total_spend / total_leads
-- Totals: SUM all numeric columns across rows
-- Conversion: each stage ÷ prior stage × 100
-- YoY delta: (current − prior) / prior × 100
-- ROI/multiplier: pipeline_value / spend
+### Slide 2: Registration & Attendance
+Registered count, Attended count, Attendance rate, In-person vs virtual breakdown
 
-## Step 3 — Build a fixed 7-slide executive event report
-Use this exact template in this exact order (do not skip slides):
-1) Executive Summary
-2) Pipeline and Revenue Performance
-3) Funnel and Conversion Health
-4) Audience and Segment Performance
-5) Platform and Data Quality
-6) Financial Efficiency and ROI
-7) Risks, Actions, and Next Steps
+### Slide 3: Pipeline Funnel
+NNN → MQL → U2 → U3 progression with conversion rates at each stage
 
-For each slide, provide:
-- one headline metric line
-- at least 3 and at most 6 bullet points
-- one Key Insight paragraph
-- add a markdown table whenever numeric breakdowns are available
-- every bullet must be an ANSWER/observation from data, not a question/instruction
-- if an intended metric is unavailable, substitute with the best available metric from returned data
-- avoid repeating the same primary metric across multiple slides; each slide should emphasize a distinct analytic angle
-- for Slide 7, include a mix of risks and actions (at least 2 risk bullets and at least 2 action bullets)
-- ensure all major user-relevant metric areas are covered across the 7 slides: attendance, funnel, lead quality, pipeline, segment variance, financial efficiency, trend/data quality
+### Slide 4: Account Segment Analysis
+Business unit breakdown, spend tier, DBX customer vs prospect
 
-Standard slide structure:
-## Slide N: [Clear Business Title]
-**Headline Metric:** [exact number from data]
-- [Supporting data point with number]
-- [Breakdown or segment insight]
-- [Comparison or rate if available]
-### Key Insight
-[Analytic conclusion — see rules below]
+### Slide 5: Cost & ROI Analysis
+Blank for now
 
-### Key Insight — mandatory writing rules
-- State what the data implies: trends, concentration, segment gaps, funnel choke points, efficiency, or risk — not a meta-description of the slide.
-- Do NOT copy, paraphrase, concatenate, or summarize the slide bullets in the Key Insight. The Key Insight must add net-new interpretation: tradeoffs, sequencing priorities, cross-bullet implications, or where decisions should diverge from averages — wording must be clearly distinct from every bullet line.
-- Start directly with substance (a metric, segment, stage, region, rate, or contrast). Do NOT use filler openers such as: "The strongest signal...", "The strongest indication...", "This slide shows...", "The key takeaway is...", "It is important to note...", or "Overall," as the opening.
-- Prefer interpretations over repetition: if the headline already states a number, explain divergence across segments, direction vs benchmark, tradeoff, or what decision is pressured — do not restate the same figure alone.
-- Use 1-3 sentences; include at least one contrast, comparison, or concentration pattern when the bullets support it (e.g. top vs bottom, early vs late funnel, region vs region).
-- Slide-specific angles: Executive Summary = cross-slide tradeoffs; Pipeline = value concentration and qualification; Funnel = where conversion breaks; Audience = who over- or under-performs; Platform/Data = confidence and gaps; Financial = spend vs yield; Risks/Actions = prioritized exposure and next moves.
+### Slide 6: YoY Comparison
+Blank for now
 
-## End with:
-## Data Gaps & Caveats
-List any queries that failed, data topics with no results, and limitations.
+### Slide 7: Cross-Event Comparison
+Blank for now
+"""
 
-## Absolute Rules
-- NEVER invent a number. Every figure must come from the provided data.
-- NEVER invent event, campaign, or program names. If a name is not explicitly present in returned data, refer to it as "the event" or "the program".
-- Do NOT use placeholder text such as "[Data Not Available]" in slide bullets.
-- Do NOT mention missing data in slide bullets; reframe the slide around available evidence only.
-- When both narrative text and tabular values are present, prioritize tabular values as source-of-truth.
-- Never claim a metric is zero if any returned tabular values for that metric are non-zero.
-- Do NOT use markdown emphasis in output (no **bold**, no *italics*, no backticks).
-- Preserve exact numeric values from Genie output (no alteration of value digits/sign/scale).
-- Every headline metric must be traceable to at least one returned Genie query block.
-- Do NOT round aggressively — preserve meaningful precision from the data.
-- Do NOT write bullets like "Show...", "Compare...", "Summarize...", "List..." or other instruction phrasing.
-- Do NOT write questions in bullets.
-- Keep the 7 slides differentiated: attendance/engagement, funnel behavior, pipeline outcomes, segment variance, data/platform reliability, financial efficiency, and prioritized actions.
+PLANNER_SYSTEM_PROMPT = """
+You are an event analytics planner for Databricks marketing. Your job is to
+take a user request about an event report and produce 5–8 wide, data-rich
+questions for a Genie analytics agent (MARDI) that has access to these tables:
+
+- rpt_event_performance: registration, attendance, NNN, MQL counts by event/child program, pipeline attribution — U2 (created), U3/QRR (qualified), amounts
+
+Rules:
+1. Each question should request MULTIPLE metrics in one query (wide, not narrow).
+2. Group by child_program or relevant dimension where useful.
+3. Always include one question for registration + attendance totals.
+4. Always include one question for pipeline funnel (NNN → MQL → U2 → U3).
+5. Always include one question for spend / cost data.
+6. Include a YoY comparison question if a prior-year event likely exists.
+7. Include a question about account segmentation if relevant.
+8. Return ONLY a JSON array of question strings. No commentary.
+
+Example output:
+[
+  "Show me total registered, attended, NNN, and MQL for NRF 2026 grouped by child program",
+  "What is the U2 pipeline amount, U2 ARR, U3 pipeline amount, and deal count for NRF 2026",
+  "Show the total allocated spend and spend breakdown by category for NRF 2026",
+  "What were the registration, attendance, and pipeline numbers for NRF 2025 for YoY comparison",
+  "Show unique accounts, DBX customer vs prospect breakdown for NRF 2026 attendees"
+]
+"""
+
+SYNTHESIZER_SYSTEM_PROMPT = f"""
+You are an expert marketing analytics report writer at Databricks.
+You receive a data packet containing raw results from multiple queries about
+a marketing event. Your job is to synthesize this into a structured report
+following the exact slide template below.
+
+{METRIC_DEFINITIONS}
+
+{REPORT_TEMPLATE}
+
+## Instructions
+1. Cross-reference data across all query results to build a complete picture.
+2. Calculate derived metrics where raw components are available:
+   - Attendance Rate = Attended / Registered × 100
+   - Cost per Lead = Total Spend / NNN
+   - fPOI = U2 ARR / Allocated Spend
+   - Conversion rates between funnel stages
+3. For each slide, provide:
+   - Headline metric(s) with actual numbers
+   - Supporting data points and breakdowns
+   - **Key insight (1-2 sentences): a concrete finding from the numbers on that slide** — e.g. which segment or program is highest/lowest, the size of the gap, or the direction of change. **Do not** write generic “how to think about this” or management-advice text; the reader must learn something specific from the data.
+4. If data for a slide is unavailable, note "[Data Not Available]" and explain what's missing.
+5. If YoY data exists, compute percentage changes.
+6. Use clean formatting with headers, bullet points, and bold for key numbers.
+7. End with a brief "Data Gaps & Caveats" section noting any failed queries or missing data.
+8. Be precise with numbers — do not round excessively or fabricate data.
+"""
+
+SLIDE_INSIGHTS_SYSTEM_PROMPT = """
+You are a marketing analytics editor. You receive JSON with a "slides" array. Each item has:
+- "title": slide title
+- "points": bullet strings that are the ONLY source of truth for that slide
+
+For each slide, in order, write ONE key insight: 1–2 sentences that interpret the numbers on that slide.
+
+Hard rules (must follow):
+- Cite only metrics, stage names (U2, U3, NNN, MQL, etc.), and dollar or percent values that **appear in that slide's points** text. If a stage or amount is not written in the points, do not mention it.
+- Do not compare U3 to U2 unless **both** "U3" and "U2" (or the same numbers with those labels) appear in that slide's points.
+- You may compute simple derived facts that use only numbers on the slide (e.g. attendance rate from registered and attended if both are in the points).
+- No generic management advice. Be specific to the figures given.
+- Return ONLY a JSON array of strings, one insight per slide, same order as "slides". Length must equal the number of slides. No markdown, no keys, no commentary.
 """
 
 
@@ -198,33 +218,8 @@ class GeminiService:
             )
         self.client = genai.Client(api_key=key)
 
-    async def plan_questions(
-        self,
-        event_name: str,
-        context: str = "",
-        schema_info: str = "",
-    ) -> list[str]:
-        if schema_info:
-            schema_section = (
-                f"\n\n## Live Data Schema from Genie\n"
-                f"The following schema was discovered directly from the Genie space. "
-                f"It includes inventory plus header/row previews. "
-                f"Use ONLY the concepts, dimensions, and measures described here.\n\n"
-                f"{schema_info}"
-            )
-        else:
-            schema_section = (
-                "\n\n## Data Schema\n"
-                "Schema could not be discovered. Generate broad, concept-level questions "
-                "covering all typical analytics domains (volume, pipeline, cost, segmentation, trends). "
-                "Do NOT reference specific column or table names."
-            )
-
-        user_msg = (
-            f"Generate analytical questions for: {event_name}"
-            + (f"\n\nAdditional context: {context}" if context else "")
-            + schema_section
-        )
+    async def plan_questions(self, user_request: str) -> list[str]:
+        user_msg = user_request
 
         response = await self.client.aio.models.generate_content(
             model=settings.gemini_plan_model,
@@ -238,39 +233,24 @@ class GeminiService:
 
         raw = (response.text or "").strip()
         print(f"[Gemini] Planner response ({len(raw)} chars): {raw[:300]}")
-        return _extract_json_array(raw, event_name)
+        return _extract_json_array(raw, user_request)
 
     async def synthesize_report_streaming(
         self,
         data_packet: str,
-        event_name: str,
+        user_request: str,
         stats: dict,
-        planned_questions: list[str] | None = None,
     ) -> AsyncGenerator[str, None]:
-        planned_section = ""
-        if planned_questions:
-            planned_lines = "\n".join(f"- Q{i+1}: {q}" for i, q in enumerate(planned_questions))
-            planned_section = (
-                "## Planned User-Relevant Questions (must be covered in report)\n"
-                f"{planned_lines}\n\n"
-            )
         user_msg = (
-            f"## Report Request\n"
-            f"Event/Campaign: {event_name}\n\n"
+            f"## Original Request\n"
+            f"{user_request}\n\n"
             f"## Query Statistics\n"
-            f"- Total queries: {stats.get('total_queries', 0)}\n"
+            f"- Queries sent: {stats.get('total_queries', 0)}\n"
             f"- Succeeded: {stats.get('succeeded', 0)}\n"
-            f"- Failed/No data: {stats.get('failed', 0)}\n\n"
-            f"{planned_section}"
-            f"## Data from Genie (use ONLY this data)\n"
+            f"- Failed: {stats.get('failed', 0)} (indices: {stats.get('failed_indices', [])})\n\n"
+            f"## Raw Data from Genie\n"
             f"{data_packet}\n\n"
-            f"Synthesize the above into a fixed 7-slide executive event report for both technical and non-technical stakeholders. "
-            f"Complete ALL seven slides in full — do not stop early; keep bullets concise if needed so Slide 7 and Data Gaps fit. "
-            f"Each slide must include a headline metric, 3-6 bullets, and a key insight that analyzes trends and contrasts — "
-            f"not slide-meta phrases (avoid openings like 'the strongest indication for this slide'). "
-            f"Each Key Insight must NOT repeat or stitch together that slide's bullet lines; add distinct analytic judgment. "
-            f"Ensure important user-relevant metrics are covered across slides and preserve exact Genie values. "
-            f"Every number must come from the data above."
+            f"Please synthesize this data into the 7-slide report format."
         )
 
         stream = await self.client.aio.models.generate_content_stream(
@@ -279,22 +259,52 @@ class GeminiService:
             config=types.GenerateContentConfig(
                 system_instruction=SYNTHESIZER_SYSTEM_PROMPT,
                 temperature=0.3,
-                max_output_tokens=16384,
+                max_output_tokens=4000,
             ),
         )
         async for chunk in stream:
             if chunk.text:
                 yield chunk.text
 
-    async def synthesize_report(
-        self, data_packet: str, event_name: str, stats: dict, planned_questions: list[str] | None = None
-    ) -> str:
+    async def synthesize_report(self, data_packet: str, user_request: str, stats: dict) -> str:
         parts = []
         async for token in self.synthesize_report_streaming(
             data_packet,
-            event_name,
+            user_request,
             stats,
-            planned_questions=planned_questions,
         ):
             parts.append(token)
         return "".join(parts)
+
+    async def generate_key_insights_for_slides(
+        self,
+        slides: list[tuple[str, list[str]]],
+    ) -> Optional[list[str]]:
+        """
+        One grounded insight per slide from bullet text only (no hallucinated metrics).
+        slides: list of (title, points) in deck order.
+        """
+        if not slides:
+            return None
+        payload = {
+            "slides": [
+                {"title": t or "", "points": list(p or [])}
+                for t, p in slides
+            ],
+        }
+        user_msg = json.dumps(payload, ensure_ascii=False)
+        response = await self.client.aio.models.generate_content(
+            model=settings.gemini_synth_model,
+            contents=user_msg,
+            config=types.GenerateContentConfig(
+                system_instruction=SLIDE_INSIGHTS_SYSTEM_PROMPT,
+                temperature=0.25,
+                max_output_tokens=2500,
+            ),
+        )
+        raw = (response.text or "").strip()
+        print(f"[Gemini] Slide insights response ({len(raw)} chars): {raw[:400]}")
+        parsed = _extract_json_string_list(raw, len(slides))
+        if not parsed or len(parsed) != len(slides):
+            return None
+        return parsed

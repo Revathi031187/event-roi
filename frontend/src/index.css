@@ -9,7 +9,9 @@
   }
 
   body {
-    @apply bg-brand-bg text-slate-900 font-sans;
+    @apply font-sans;
+    background-color: #f9f7f4;
+    color: #1b3139;
   }
 
   * {
@@ -45,10 +47,13 @@
   }
 
   .prose-dark th {
-    @apply bg-slate-100 text-slate-900 font-semibold;
+    @apply font-semibold;
+    background-color: #f9f7f4;
+    color: #1b3139;
   }
 
   .prose-dark td {
-    @apply text-slate-700;
+    @apply text-brand-lgray;
   }
 }
+

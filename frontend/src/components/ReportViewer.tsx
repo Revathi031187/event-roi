@@ -60,9 +60,12 @@ function pickBestReportText(report: string, streamed?: string | null): string {
   if (!s) return r;
   const rN = countSlideHeaders(r);
   const sN = countSlideHeaders(s);
+  // Prefer more slide sections (complete deck).
   if (sN > rN) return s;
   if (rN > sN) return r;
-  return s.length > r.length ? s : r;
+  // Same structure: longer wins (more bullets/tables per slide); tie-break to saved report.
+  if (r.length >= s.length) return r;
+  return s;
 }
 
 export default function ReportViewer({

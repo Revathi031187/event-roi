@@ -26,26 +26,27 @@ from config import settings
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
+# Databricks web-inspired core palette
 BRAND_RED    = RGBColor(0xFF, 0x36, 0x21)
-BRAND_TEAL   = RGBColor(0x00, 0x94, 0xBD)
-BRAND_GREEN  = RGBColor(0x00, 0xB8, 0x6A)
-BRAND_ORANGE = RGBColor(0xFF, 0x7D, 0x00)
-BRAND_PURPLE = RGBColor(0x7C, 0x3A, 0xED)
+BRAND_TEAL   = RGBColor(0x1B, 0x51, 0x62)
+BRAND_GREEN  = RGBColor(0x00, 0xA9, 0x72)
+BRAND_ORANGE = RGBColor(0xFF, 0xAB, 0x00)
+BRAND_PURPLE = RGBColor(0xAB, 0x40, 0x57)
 
-HDR_BG    = RGBColor(0x13, 0x1E, 0x3A)   # deep navy header
-COVER_BG  = RGBColor(0x0D, 0x16, 0x2E)   # cover background
-SLIDE_BG  = RGBColor(0xF7, 0xF8, 0xFB)   # slide content background
+HDR_BG    = RGBColor(0x1B, 0x31, 0x39)
+COVER_BG  = RGBColor(0x14, 0x3D, 0x4A)
+SLIDE_BG  = RGBColor(0xF9, 0xF7, 0xF4)
 CARD_BG   = RGBColor(0xFF, 0xFF, 0xFF)
-CARD_BOR  = RGBColor(0xE1, 0xE7, 0xF0)
-SURFACE   = RGBColor(0xEF, 0xF3, 0xF9)
+CARD_BOR  = RGBColor(0xDC, 0xE0, 0xE2)
+SURFACE   = RGBColor(0xEE, 0xED, 0xE9)
 TXT_WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-TXT_DARK  = RGBColor(0x1A, 0x20, 0x2C)
-TXT_MID   = RGBColor(0x4A, 0x55, 0x68)
-TXT_LIGHT = RGBColor(0x71, 0x80, 0x96)
-DIVIDER   = RGBColor(0xE1, 0xE7, 0xF0)
+TXT_DARK  = RGBColor(0x1B, 0x31, 0x39)
+TXT_MID   = RGBColor(0x5A, 0x6F, 0x77)
+TXT_LIGHT = RGBColor(0x90, 0xA5, 0xB1)
+DIVIDER   = RGBColor(0xDC, 0xE0, 0xE2)
 
 ACCENTS = [BRAND_RED, BRAND_TEAL, BRAND_GREEN, BRAND_ORANGE, BRAND_PURPLE]
-CHART_HEX = ["#FF3621", "#0094BD", "#00B86A", "#FF7D00", "#7C3AED", "#0BC5EA", "#F59E0B"]
+CHART_HEX = ["#FF3621", "#1B5162", "#00A972", "#FFAB00", "#AB4057", "#618794", "#90A5B1"]
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
 
@@ -116,7 +117,7 @@ def _rrect(slide, l, t, w, h, fill: RGBColor,
 def _txt(slide, text: str, l, t, w, h,
          size: float = 11, bold: bool = False, italic: bool = False,
          color: RGBColor = TXT_DARK, align: PP_ALIGN = PP_ALIGN.LEFT,
-         wrap: bool = True, font: str = "Calibri",
+         wrap: bool = True, font: str = "DM Sans",
          ls: float = 1.15, anchor: MSO_ANCHOR = MSO_ANCHOR.TOP,
          space_after: float = 1):
     txb = slide.shapes.add_textbox(l, t, w, h)
@@ -323,11 +324,11 @@ def _chart_bar(labels: list[str], values: list[float],
     max_v = max(values) if values else 1
     for i, (v, lbl) in enumerate(zip(values, labels)):
         ax.text(-max_v * 0.025, i, _fit(lbl, 28),
-                va="center", ha="right", color="#4A5568", fontsize=9, fontname="Calibri")
+                va="center", ha="right", color="#4A5568", fontsize=9, fontname="DM Sans")
         fmt = f"${int(v):,}" if max_v > 1000 else (f"{v:.1f}%" if max_v < 101 else f"{int(v):,}")
         ax.text(v + max_v * 0.025, i, fmt,
                 va="center", ha="left", color="#1A202C",
-                fontsize=9, fontname="Calibri", fontweight="bold")
+                fontsize=9, fontname="DM Sans", fontweight="bold")
 
     ax.set_xlim(-max_v * 0.40, max_v * 1.30)
     ax.set_ylim(-0.5, n - 0.5)
@@ -379,10 +380,10 @@ def _chart_funnel(stages: list[str], values: list[float],
         mid_y = y + seg_h / 2
         ax.text(0.5, mid_y + 0.018, lbl,
                 ha="center", va="center", color="#FFFFFF",
-                fontsize=9, fontname="Calibri", fontweight="bold", zorder=4)
+                fontsize=9, fontname="DM Sans", fontweight="bold", zorder=4)
         ax.text(0.5, mid_y - 0.022, f"{cnt}{conv}",
                 ha="center", va="center", color="#FFFFFF",
-                fontsize=7.5, fontname="Calibri", zorder=4)
+                fontsize=7.5, fontname="DM Sans", zorder=4)
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)

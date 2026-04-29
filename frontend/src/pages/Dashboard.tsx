@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Download, BarChart3, RefreshCw, Clock, MonitorPlay, FileUp } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { Download, BarChart3, RefreshCw, Clock, FileUp } from 'lucide-react';
 import Header from '../components/Header';
 import EventForm from '../components/EventForm';
 import PipelineProgress from '../components/PipelineProgress';
@@ -7,12 +8,13 @@ import OutlineEditor from '../components/OutlineEditor';
 import ReportViewer from '../components/ReportViewer';
 import ReportHistory from '../components/ReportHistory';
 import PPTProgress from '../components/PPTProgress';
-import SlideDeckPreview from '../components/SlideDeckPreview';
 import { useEventReport } from '../hooks/useEventReport';
 import { checkStatus } from '../api/client';
 import type { ApiStatus } from '../types';
 
 export default function Dashboard() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const FALLBACK_STATUS: ApiStatus = {
     gemini_configured: false,
     databricks_configured: false,
@@ -22,16 +24,39 @@ export default function Dashboard() {
   };
   const [apiStatus, setApiStatus] = useState<ApiStatus | null>(null);
   const [showReport, setShowReport] = useState(false);
-  const [showSlideshow, setShowSlideshow] = useState(false);
   const [showSlidesExportHelp, setShowSlidesExportHelp] = useState(false);
   const [historyRefresh, setHistoryRefresh] = useState(0);
 
   const {
-    step, phases, questions, queryProgress, synthesisText,
+    step, jobId, phases, questions, queryProgress, synthesisText,
     report, outline, pptUrl, pptFilename, activeEventName,
     error, generatingPPT, pptSlides,
-    startGeneration, generatePPT, loadSavedReport, reset,
+    startGeneration, generatePPT, loadSavedReport, reset, setStepFromRoute,
   } = useEventReport();
+
+  const STEP_TO_PATH: Record<typeof step, string> = {
+    form: '/',
+    generating: '/generating',
+    outline: '/outline',
+    'ppt-generating': '/ppt-generating',
+    complete: '/complete',
+  };
+  const pathToStep = (pathname: string) => {
+    switch (pathname) {
+      case '/':
+        return 'form';
+      case '/generating':
+        return 'generating';
+      case '/outline':
+        return 'outline';
+      case '/ppt-generating':
+        return 'ppt-generating';
+      case '/complete':
+        return 'complete';
+      default:
+        return null;
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -57,6 +82,92 @@ export default function Dashboard() {
       active = false;
     };
   }, []);
+
+  // Route -> step sync (supports back/forward and direct URL entry).
+  useEffect(() => {
+    const routeStep = pathToStep(location.pathname);
+    if (!routeStep) {
+      navigate('/', { replace: true });
+      return;
+    }
+    if (routeStep !== step) {
+      setStepFromRoute(routeStep);
+    }
+  }, [location.pathname, navigate, setStepFromRoute]);
+
+  // Step -> route sync (pushes history so browser navigation works).
+  useEffect(() => {
+    const desiredPath = STEP_TO_PATH[step];
+    if (location.pathname !== desiredPath) {
+      navigate(desiredPath, { replace: true });
+    }
+  }, [location.pathname, navigate, step]);
+
+  // Step validity guard: if a route/state combo is invalid, recover to a safe step.
+  useEffect(() => {
+    const hasPipelineContext = Boolean(
+      jobId ||
+      activeEventName ||
+      questions.length > 0 ||
+      queryProgress.length > 0 ||
+      synthesisText ||
+      phases.some(p => p.status !== 'idle')
+    );
+
+    if (step === 'generating' && !hasPipelineContext) {
+      setStepFromRoute('form');
+      navigate('/', { replace: true });
+      return;
+    }
+
+    if (step === 'outline' && !outline) {
+      if (hasPipelineContext) {
+        setStepFromRoute('generating');
+        navigate('/generating', { replace: true });
+      } else {
+        setStepFromRoute('form');
+        navigate('/', { replace: true });
+      }
+      return;
+    }
+
+    if (step === 'ppt-generating' && !generatingPPT && pptSlides.length === 0) {
+      if (outline) {
+        setStepFromRoute('outline');
+        navigate('/outline', { replace: true });
+      } else if (hasPipelineContext) {
+        setStepFromRoute('generating');
+        navigate('/generating', { replace: true });
+      } else {
+        setStepFromRoute('form');
+        navigate('/', { replace: true });
+      }
+      return;
+    }
+
+    if (step === 'complete' && !outline) {
+      if (hasPipelineContext) {
+        setStepFromRoute('generating');
+        navigate('/generating', { replace: true });
+      } else {
+        setStepFromRoute('form');
+        navigate('/', { replace: true });
+      }
+    }
+  }, [
+    activeEventName,
+    generatingPPT,
+    jobId,
+    navigate,
+    outline,
+    phases,
+    pptSlides.length,
+    queryProgress.length,
+    questions.length,
+    setStepFromRoute,
+    step,
+    synthesisText,
+  ]);
 
   // Refresh history when a new report is complete
   useEffect(() => {
@@ -150,14 +261,30 @@ export default function Dashboard() {
 
         {/* ── GENERATING ───────────────────────────────────────────────────── */}
         {step === 'generating' && (
-          <PipelineProgress
-            phases={phases}
-            questions={questions}
-            queryProgress={queryProgress}
-            synthesisText={synthesisText}
-            eventName={eventName}
-            error={error}
-          />
+          <>
+            <PipelineProgress
+              phases={phases}
+              questions={questions}
+              queryProgress={queryProgress}
+              synthesisText={synthesisText}
+              eventName={eventName}
+              error={error}
+            />
+            {phases[2]?.status === 'done' && outline && (
+              <div className="mt-4 text-center">
+                <button
+                  onClick={() => {
+                    setStepFromRoute('outline');
+                    navigate('/outline', { replace: true });
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-white
+                             bg-gradient-to-r from-brand-red to-orange-500 hover:from-red-600 hover:to-orange-600 transition-all"
+                >
+                  Continue to Outline
+                </button>
+              </div>
+            )}
+          </>
         )}
 
         {/* ── PPT GENERATING ───────────────────────────────────────────────── */}
@@ -227,13 +354,6 @@ export default function Dashboard() {
                   </div>
                   <div className="mt-3 flex items-center gap-2">
                     <button
-                      onClick={() => setShowSlideshow(true)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-brand-border text-brand-blue hover:bg-blue-50 transition-all"
-                    >
-                      <MonitorPlay className="w-3.5 h-3.5" />
-                      Preview Slideshow
-                    </button>
-                    <button
                       onClick={() => setShowSlidesExportHelp(true)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-brand-border text-brand-dgray hover:text-slate-900 hover:bg-slate-50 transition-all"
                     >
@@ -247,16 +367,6 @@ export default function Dashboard() {
             </div>
 
             <div className="flex gap-3 justify-center">
-              {outline && (
-                <button
-                  onClick={() => setShowSlideshow(true)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl border border-brand-border
-                           text-brand-dgray hover:text-slate-900 hover:border-brand-blue/50 text-sm transition-all"
-                >
-                  <MonitorPlay className="w-4 h-4" />
-                  Full Slideshow Preview
-                </button>
-              )}
               <button onClick={() => setShowReport(true)}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl border border-brand-border
                            text-brand-dgray hover:text-slate-900 hover:border-brand-blue/50 text-sm transition-all">
@@ -276,9 +386,6 @@ export default function Dashboard() {
                 streamedText={synthesisText}
                 onClose={() => setShowReport(false)}
               />
-            )}
-            {showSlideshow && outline && (
-              <SlideDeckPreview outline={outline} onClose={() => setShowSlideshow(false)} />
             )}
             {showSlidesExportHelp && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/35 backdrop-blur-sm">
