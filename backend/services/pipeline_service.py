@@ -5,8 +5,26 @@ from typing import Dict, Optional, Any
 from .gemini_service import GeminiService
 from .genie_service import GenieService, build_data_packet
 from .outline_parser import parse_report_to_outline
-from . import db_service
+from . import db_service, observability
 from models.schemas import ReportOutline
+
+# Crude, cheap defensive check on freeform user text that flows straight into
+# the planner prompt (GenerateRequest.additional_context). Not a safety judge
+# (see LANGFUSE_OBSERVABILITY_REFERENCE.md for why this app's threat surface
+# doesn't currently warrant one) — just a Tier-1 tripwire worth trending.
+_INJECTION_MARKERS = (
+    "ignore previous instructions",
+    "ignore all previous",
+    "disregard the above",
+    "system:",
+    "you are now",
+    "new instructions:",
+)
+
+
+def _detect_injection_markers(text: str) -> bool:
+    t = (text or "").lower()
+    return any(marker in t for marker in _INJECTION_MARKERS)
 
 # ── In-memory job store ───────────────────────────────────────────────────────
 _job_queues: Dict[str, asyncio.Queue] = {}
@@ -348,6 +366,40 @@ async def run_pipeline(
     databricks_token: str = None,
     genie_space_id: str = None,
 ) -> None:
+    with observability.traced_pipeline_run(job_id, event_name, additional_context) as root_span:
+        await _run_pipeline_traced(
+            job_id=job_id,
+            event_name=event_name,
+            additional_context=additional_context,
+            databricks_host=databricks_host,
+            databricks_token=databricks_token,
+            genie_space_id=genie_space_id,
+            root_span=root_span,
+        )
+
+
+async def _run_pipeline_traced(
+    job_id: str,
+    event_name: str,
+    additional_context: str,
+    databricks_host: Optional[str],
+    databricks_token: Optional[str],
+    genie_space_id: Optional[str],
+    root_span: Any,
+) -> None:
+    trace_id = observability.current_trace_id()
+
+    # Tier-1 code evaluator: cheap tripwire on freeform user text that lands
+    # directly in the planner prompt. Always runs, never blocks the pipeline.
+    if _detect_injection_markers(additional_context):
+        observability.push_score(
+            name="prompt_injection_marker_detected",
+            value=True,
+            trace_id=trace_id,
+            data_type="BOOLEAN",
+            comment="Marker phrase found in additional_context free-text field.",
+        )
+
     try:
         gemini = GeminiService()
         genie = GenieService(
@@ -368,6 +420,23 @@ async def run_pipeline(
         )
         planned_questions = await gemini.plan_questions(user_request=user_request)
         questions = _dedupe_preserve_order(planned_questions)[:MAX_QUESTIONS]
+
+        # Tier-1 code evaluator: `_score_question` / `_filter_high_signal_questions`
+        # were already written in this file (pre-existing) but never wired into
+        # pipeline behavior — dead code. Reused here purely as a *measurement*,
+        # not to change what questions actually get sent to Genie, so this adds
+        # an observability signal with zero behavior change.
+        _accepted, _rejected = _filter_high_signal_questions(planned_questions)
+        _all_scores = [_score_question(q) for q in planned_questions] or [0]
+        observability.push_score(
+            name="question_plan_signal_score",
+            value=sum(_all_scores) / len(_all_scores),
+            trace_id=trace_id,
+            data_type="NUMERIC",
+            comment=f"Avg heuristic score across {len(planned_questions)} planned questions "
+                    f"({len(_accepted)} would pass the existing accept threshold).",
+            metadata={"accepted": len(_accepted), "rejected": len(_rejected), "total": len(planned_questions)},
+        )
 
         await _emit(job_id, {
             "type": "phase_done", "phase": 1,
@@ -404,6 +473,24 @@ async def run_pipeline(
 
         query_results = await genie.batch_ask(questions, progress_callback=on_progress)
         data_packet, stats = build_data_packet(query_results)
+
+        # Tier-1 code evaluator: tool-use reliability for the Genie NL->SQL calls.
+        total_q = max(stats["total_queries"], 1)
+        total_attempts = sum((r or {}).get("attempts", 1) for r in query_results)
+        observability.push_score(
+            name="genie_query_success_rate",
+            value=stats["succeeded"] / total_q,
+            trace_id=trace_id,
+            data_type="NUMERIC",
+            comment=f"{stats['succeeded']}/{stats['total_queries']} Genie queries succeeded.",
+        )
+        observability.push_score(
+            name="genie_query_retry_rate",
+            value=(total_attempts - total_q) / total_q,
+            trace_id=trace_id,
+            data_type="NUMERIC",
+            comment="Average extra attempts per question beyond the first (0 = no retries needed).",
+        )
 
         await _emit(job_id, {
             "type": "phase_done", "phase": 2,
@@ -470,6 +557,23 @@ async def run_pipeline(
                 outline = retry_outline
                 print(f"[Pipeline] Retry outline accepted ({retry_non_empty}/7 slides with points)")
 
+        # Tier-1 code evaluator: formalizes this pipeline's own pre-existing
+        # completeness gates (explicit_slides<7 / non_empty_slides<5 above,
+        # which already trigger a same-process retry) as a trended Langfuse
+        # score, rather than leaving them as a silent internal retry-or-not
+        # decision with no visibility once retries are exhausted.
+        final_explicit_slides = _count_explicit_slides(full_report)
+        final_non_empty_slides = sum(1 for s in outline.slides if (s.points or []))
+        observability.push_score(
+            name="synthesis_structural_completeness",
+            value=(final_explicit_slides / 7 + final_non_empty_slides / 7) / 2,
+            trace_id=trace_id,
+            data_type="NUMERIC",
+            comment=f"{final_explicit_slides}/7 explicit slide headers, "
+                    f"{final_non_empty_slides}/7 slides with bullet points, "
+                    f"after this pipeline's own built-in retry gates.",
+        )
+
         # Final grounding pass: make slide bullets answer-oriented from Genie query outputs.
         _enrich_outline_with_query_answers(outline, query_results)
 
@@ -515,10 +619,40 @@ async def run_pipeline(
 
         await _emit(job_id, {"type": "complete"})
 
+        if root_span:
+            try:
+                root_span.update(
+                    output={
+                        "report_chars": len(full_report),
+                        "slide_count": len(outline.slides),
+                        "query_stats": stats,
+                    }
+                )
+            except Exception:
+                pass
+
+        # Tier 2 (LLM-as-judge) evaluators run out-of-band, sampled — see
+        # backend/evals/run_evaluators.py and LANGFUSE_OBSERVABILITY_REFERENCE.md.
+        # Not invoked synchronously here: judge calls cost real money/latency
+        # and shouldn't ride the same interactive SSE-streamed request path
+        # this pipeline serves (see cost-governance note in the reference doc).
+
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
         print(f"[Pipeline] FATAL ERROR:\n{tb}")
+        if root_span:
+            try:
+                root_span.update(level="ERROR", status_message=str(exc)[:500])
+            except Exception:
+                pass
+        observability.push_score(
+            name="pipeline_fatal_error",
+            value=True,
+            trace_id=trace_id,
+            data_type="BOOLEAN",
+            comment=str(exc)[:300],
+        )
         await _emit(job_id, {
             "type": "error",
             "message": str(exc),

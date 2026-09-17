@@ -4,6 +4,7 @@ from typing import AsyncGenerator, Optional
 from google import genai
 from google.genai import types
 from config import settings
+from services import observability
 
 
 # ── JSON extraction helper ────────────────────────────────────────────────────
@@ -221,19 +222,32 @@ class GeminiService:
     async def plan_questions(self, user_request: str) -> list[str]:
         user_msg = user_request
 
-        response = await self.client.aio.models.generate_content(
-            model=settings.gemini_plan_model,
-            contents=user_msg,
-            config=types.GenerateContentConfig(
-                system_instruction=PLANNER_SYSTEM_PROMPT,
-                temperature=0.2,
-                max_output_tokens=1500,
-            ),
-        )
+        with observability.traced_generation(
+            "gemini-plan-questions",
+            settings.gemini_plan_model,
+            {"system_instruction": PLANNER_SYSTEM_PROMPT, "user_message": user_msg},
+            metadata={"temperature": 0.2, "max_output_tokens": 1500},
+        ) as gen:
+            response = await self.client.aio.models.generate_content(
+                model=settings.gemini_plan_model,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=PLANNER_SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_output_tokens=1500,
+                ),
+            )
 
-        raw = (response.text or "").strip()
-        print(f"[Gemini] Planner response ({len(raw)} chars): {raw[:300]}")
-        return _extract_json_array(raw, user_request)
+            raw = (response.text or "").strip()
+            print(f"[Gemini] Planner response ({len(raw)} chars): {raw[:300]}")
+            questions = _extract_json_array(raw, user_request)
+
+            if gen:
+                gen.update(
+                    output=questions,
+                    usage_details=observability.usage_details_from_gemini(response),
+                )
+            return questions
 
     async def synthesize_report_streaming(
         self,
@@ -253,18 +267,38 @@ class GeminiService:
             f"Please synthesize this data into the 7-slide report format."
         )
 
-        stream = await self.client.aio.models.generate_content_stream(
-            model=settings.gemini_synth_model,
-            contents=user_msg,
-            config=types.GenerateContentConfig(
-                system_instruction=SYNTHESIZER_SYSTEM_PROMPT,
-                temperature=0.3,
-                max_output_tokens=4000,
-            ),
-        )
-        async for chunk in stream:
-            if chunk.text:
-                yield chunk.text
+        with observability.traced_generation(
+            "gemini-synthesize-report",
+            settings.gemini_synth_model,
+            {"system_instruction": SYNTHESIZER_SYSTEM_PROMPT, "user_message": user_msg},
+            metadata={"temperature": 0.3, "max_output_tokens": 4000, "query_stats": stats},
+        ) as gen:
+            stream = await self.client.aio.models.generate_content_stream(
+                model=settings.gemini_synth_model,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYNTHESIZER_SYSTEM_PROMPT,
+                    temperature=0.3,
+                    max_output_tokens=4000,
+                ),
+            )
+            collected: list[str] = []
+            last_chunk = None
+            async for chunk in stream:
+                last_chunk = chunk
+                if chunk.text:
+                    collected.append(chunk.text)
+                    yield chunk.text
+
+            if gen:
+                gen.update(
+                    output="".join(collected),
+                    usage_details=(
+                        observability.usage_details_from_gemini(last_chunk)
+                        if last_chunk is not None
+                        else None
+                    ),
+                )
 
     async def synthesize_report(self, data_packet: str, user_request: str, stats: dict) -> str:
         parts = []
@@ -293,18 +327,31 @@ class GeminiService:
             ],
         }
         user_msg = json.dumps(payload, ensure_ascii=False)
-        response = await self.client.aio.models.generate_content(
-            model=settings.gemini_synth_model,
-            contents=user_msg,
-            config=types.GenerateContentConfig(
-                system_instruction=SLIDE_INSIGHTS_SYSTEM_PROMPT,
-                temperature=0.25,
-                max_output_tokens=2500,
-            ),
-        )
-        raw = (response.text or "").strip()
-        print(f"[Gemini] Slide insights response ({len(raw)} chars): {raw[:400]}")
-        parsed = _extract_json_string_list(raw, len(slides))
-        if not parsed or len(parsed) != len(slides):
-            return None
-        return parsed
+        with observability.traced_generation(
+            "gemini-slide-insights",
+            settings.gemini_synth_model,
+            {"system_instruction": SLIDE_INSIGHTS_SYSTEM_PROMPT, "user_message": user_msg},
+            metadata={"temperature": 0.25, "max_output_tokens": 2500, "slide_count": len(slides)},
+        ) as gen:
+            response = await self.client.aio.models.generate_content(
+                model=settings.gemini_synth_model,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=SLIDE_INSIGHTS_SYSTEM_PROMPT,
+                    temperature=0.25,
+                    max_output_tokens=2500,
+                ),
+            )
+            raw = (response.text or "").strip()
+            print(f"[Gemini] Slide insights response ({len(raw)} chars): {raw[:400]}")
+            parsed = _extract_json_string_list(raw, len(slides))
+
+            if gen:
+                gen.update(
+                    output=parsed,
+                    usage_details=observability.usage_details_from_gemini(response),
+                )
+
+            if not parsed or len(parsed) != len(slides):
+                return None
+            return parsed

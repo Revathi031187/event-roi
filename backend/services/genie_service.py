@@ -5,6 +5,7 @@ import time
 import traceback
 import requests
 from config import settings
+from services import observability
 
 MAX_RETRIES = 3
 
@@ -212,28 +213,60 @@ class GenieService:
 
     async def ask(self, question: str, max_retries: int = MAX_RETRIES) -> dict:
         """Async ask with exponential-backoff retry on FAILED or low-signal responses."""
-        last_result: dict = {}
-        base_question = question.strip()
-        for attempt in range(max_retries):
-            query_to_send = base_question if attempt == 0 else self._rephrase_for_data_recovery(base_question)
-            result = await asyncio.to_thread(self._sync_ask_once, query_to_send)
-            last_result = result
-            if result.get("status") != "FAILED" and not self._is_low_signal_response(result):
-                return result
+        with observability.traced_tool(
+            "genie-ask",
+            question,
+            metadata={"space_id": self.space_id, "demo_mode": self._use_demo, "max_retries": max_retries},
+        ) as span:
+            last_result: dict = {}
+            attempts_made = 0
+            for attempt in range(max_retries):
+                attempts_made = attempt + 1
+                query_to_send = base_question = question.strip()
+                if attempt > 0:
+                    query_to_send = self._rephrase_for_data_recovery(base_question)
+                result = await asyncio.to_thread(self._sync_ask_once, query_to_send)
+                last_result = result
+                if result.get("status") != "FAILED" and not self._is_low_signal_response(result):
+                    result["attempts"] = attempts_made
+                    if span:
+                        span.update(output=self._tool_output_preview(result))
+                    return result
 
-            if attempt < max_retries - 1:
-                delay = (2 ** attempt) + random.uniform(0, 1)
-                print(
-                    f"[Genie] Query low-signal/failed (attempt {attempt+1}/{max_retries}), "
-                    f"retrying in {delay:.1f}s: {base_question[:60]}"
-                )
-                await asyncio.sleep(delay)
+                if attempt < max_retries - 1:
+                    delay = (2 ** attempt) + random.uniform(0, 1)
+                    print(
+                        f"[Genie] Query low-signal/failed (attempt {attempt+1}/{max_retries}), "
+                        f"retrying in {delay:.1f}s: {base_question[:60]}"
+                    )
+                    await asyncio.sleep(delay)
 
-        last_result["error"] = (
-            f"[After {max_retries} attempts] "
-            + (last_result.get("error") or "Unknown error")
-        )
-        return last_result
+            last_result["error"] = (
+                f"[After {max_retries} attempts] "
+                + (last_result.get("error") or "Unknown error")
+            )
+            last_result["attempts"] = attempts_made
+            if span:
+                span.update(output=self._tool_output_preview(last_result), level="WARNING")
+            return last_result
+
+    @staticmethod
+    def _tool_output_preview(result: dict, row_limit: int = 30) -> dict:
+        """Bounded view of a Genie result for tracing — full data_rows can be
+        large and this keeps trace payloads reasonable. Groundedness eval
+        (Phase D) reads this, so real values are kept, just capped in count."""
+        rows = result.get("data_rows") or []
+        preview = {
+            "status": result.get("status"),
+            "attempts": result.get("attempts"),
+            "error": result.get("error"),
+            "sql_query": result.get("sql_query"),
+            "text_response": result.get("text_response"),
+            "data_columns": result.get("data_columns"),
+            "data_rows_preview": rows[:row_limit],
+            "data_rows_total": len(rows),
+        }
+        return preview
 
     def _is_low_signal_response(self, result: dict) -> bool:
         rows = result.get("data_rows", []) or []

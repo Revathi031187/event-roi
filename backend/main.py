@@ -6,14 +6,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from config import settings
 from routers.generate import router as generate_router
-from services import db_service
+from services import db_service, observability
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialise SQLite on startup
     await db_service.init_db()
+    # Langfuse tracing — no-ops entirely if LANGFUSE_* env vars aren't set
+    # (fail open, see services/observability.py).
+    observability.init_langfuse()
     yield
+    observability.shutdown_langfuse()
 
 
 app = FastAPI(

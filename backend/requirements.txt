@@ -13,3 +13,7 @@ Pillow>=11.0.0
 matplotlib>=3.9.0
 numpy>=2.0.0
 aiosqlite>=0.20.0
+
+# Observability / evals — pinned exactly; verify SDK surface before bumping
+# (see backend/services/observability.py header for the API-surface notes).
+langfuse==4.15.4
